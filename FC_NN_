@@ -1,0 +1,175 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import log_loss
+
+#Layer size for each layer needs to be declared explicitly below
+layer_size = [784,500,10]
+l = len(layer_size) - 2
+learning_rate = 0.01
+batch_size = 40
+epochs = 100
+eps = 1e-8
+alpha = 1e-3
+#Initialize hyperparameters related to batch norm
+gamma = [np.ones(layer_size[i+1],dtype='float64') for i in range(l)]
+beta = [np.zeros(layer_size[i+1],dtype = 'float64') for i in range(l)]
+
+def relu_neuron(z):
+    z[z<0] *= 0.01
+    return z
+
+def relu_prime(z):
+    z[z > 0] = 1.0
+    z[z < 0] = 0.01
+    return z
+
+def dropout(layer_activations,dropout_percent,do_dropout):
+    if do_dropout == 'train' :
+        mask1 = np.random.binomial(1, (1-dropout_percent), size=layer_activations.shape)
+        layer_activations *= mask1
+    else:
+        layer_activations *= (1-dropout_percent)
+    return layer_activations
+
+def softmax(x):
+    for i in range(x.shape[0]):
+        c = x[i] - np.max(x[i])
+        x[i] = np.exp(c)
+        x[i] = x[i]/x[i].sum()
+    return x
+
+def activate(z,layer_number,bn_test_or_train):
+    if layer_number!=l+1:
+        activations1, cache1 = batch_norm_forward(z, layer_number-1,bn_test_or_train)
+        #activations = dropout(activations,0.5,test_or_train) #Dropout not needed if batch norm is used
+        activations = relu_neuron(activations1)
+        return activations,cache1
+    else:
+        activations = softmax(z)
+        return activations
+
+def backprop(activation,z,yactual):
+    weight_deltas = list(range(l+1))
+    weight_deltas[l] = activation[l+1] - yactual
+    for i in range(l,0,-1):
+        weight_deltas[i-1] = np.multiply(np.dot(weight_deltas[i],np.transpose(w[i][1:])),relu_prime(z[i-1]))
+    cost_terms_weight1 = [np.dot(np.transpose(activation[i]), weight_deltas[i]) for i in range(l,-1,-1)]
+    return cost_terms_weight1
+
+def backprop_with_batchnorm(z,activation,yactual,cache):
+    weight_deltas = list(range(l + 1))
+    dbeta = dgamma = list(range(l))
+    layer_weight_deltas = list(range(l))
+    weight_deltas[l] = activation[l + 1] - yactual
+    for i in range(l, 0, -1):
+        layer_weight_deltas[i-1] = np.multiply(np.dot(weight_deltas[i], np.transpose(w[i])), relu_prime(z[i - 1]))
+        weight_deltas[i-1],dbeta[i-1],dgamma[i-1] = batch_norm_backprop(layer_weight_deltas[i-1],cache[i-1],i-1)
+    cost_terms_weight1 = [np.dot(np.transpose(activation[i]), weight_deltas[i]) for i in range(l, -1, -1)]
+    return cost_terms_weight1,dbeta,dgamma
+
+def forward_pass(X,bn_test_or_train):
+    z = list(range(l + 1))
+    activations = list(range(l + 2))
+    cache = list(range(l))
+    activations[0] = np.asarray(X)
+    for i in range(0,l+1):
+        z[i] = np.dot(activations[i], w[i])
+        if i == l:
+            activations[i+1] = activate(z[i],i+1,bn_test_or_train)
+        else:
+            activations[i+1],cache[i] = activate(z[i],i+1,bn_test_or_train)
+    return activations,z, cache
+
+def adam(weights,grad,time_step):
+    M = [np.zeros_like(v) for v in weights]
+    R = [np.zeros_like(v) for v in weights]
+    beta1 = .9
+    beta2 = .999
+    for k in range(0,len(grad)):
+        M[k] = beta1 * M[k] + (1. - beta1) * grad[k]
+        R[k] = beta2 * R[k] + (1. - beta2) * grad[k] ** 2
+
+        m_k_hat = M[k] / (1. - beta1 ** (time_step))
+        r_k_hat = R[k] / (1. - beta2 ** (time_step))
+
+        weights[k] -= alpha * m_k_hat / (np.sqrt(r_k_hat) + eps)
+    return weights
+
+def batch_norm_forward(inputs,layer_number,bn_train_or_test):
+    global mu_running
+    global var_running
+    if bn_train_or_test == 'train':
+       mean = np.mean(inputs, axis=0)
+       mu = inputs - mean
+       var = np.mean(mu**2,axis=0)
+       mu_running[layer_number] = (mu_running[layer_number] + mean) / 2.
+       var_running[layer_number] = (var_running[layer_number] + var) / 2.
+    else:
+        mu = inputs - mu_running[layer_number]
+        var = var_running[layer_number]
+    sqrt_var = np.sqrt(var+eps)
+    ivar = 1. / sqrt_var
+    input_cap = mu * ivar
+    output = input_cap * gamma[layer_number] + beta[layer_number]
+    cache = (mu,sqrt_var,ivar,input_cap)
+    return output,cache
+
+def batch_norm_backprop(dout,cache,layer_number):
+    mu,sqrt_var,ivar,input_cap = cache
+    dbeta1 = np.sum(dout,axis=0)
+    dgammax = dout
+    dgamma1 = np.sum(input_cap*dgammax,axis=0)
+    dinput_cap = gamma[layer_number] * dgammax
+    divar = np.sum(mu * dinput_cap,axis=0)
+    dsqrt_variance = (-1. / (sqrt_var)**2) * divar
+    dvariance = (0.5 * 1./ sqrt_var) * dsqrt_variance
+    dmu = (2. * mu * dvariance) / dout.shape[0] + dinput_cap * ivar
+    dmean = -1. * np.sum(dmu,axis=0) / dout.shape[0]
+    dinputs = dmean + dmu
+    return dinputs,dbeta1,dgamma1
+
+# Extract training data into data array
+with open('/home/amit/Desktop/ML/Kaggle/MNIST digit recognition/train.csv') as dest_f:
+    training = pd.read_csv(dest_f)
+dest_f.close()
+
+with open('/home/amit/Desktop/ML/Kaggle/MNIST digit recognition/test.csv') as dest_f:
+    test = pd.read_csv(dest_f)
+dest_f.close()
+
+yactual_labels = training['label']
+training.drop('label',inplace=True,axis=1)
+
+#Initialize weights for all layers
+w = [np.random.normal(size=(layer_size[i],layer_size[i+1])) for i in range(len(layer_size)-1)]
+#w = [np.random.rand(layer_size[i],layer_size[i+1]) for i in range(len(layer_size)-1)]
+
+#Training with mini-batch gradient descent for several epochs with Adam optimization
+for j in range(epochs):
+    X_train, X_test, y_train, y_test = train_test_split(training, yactual_labels, test_size=0.2, random_state=42)
+    yactual_train = pd.get_dummies(y_train)
+    mu_running = [np.zeros(layer_size[i + 1], dtype='float64') for i in range(l)]
+    var_running = [np.zeros(layer_size[i + 1], dtype='float64') for i in range(l)]
+    for i in range(0,X_train.shape[0],batch_size):
+        a,Z,cache = forward_pass(X_train[i:i+batch_size],'train')
+        cost_terms_weight,dbeta,dgamma = backprop_with_batchnorm(Z,a,yactual_train[i:i+batch_size],cache)
+        #w = [w[k] - (cost_terms_weight[-(k+1)] * learning_rate / batch_size) for k in range(l+1)]
+        gamma = [gamma[m] - (dgamma[m] * learning_rate / batch_size) for m in range(l)]
+        beta = [beta[m] - (dbeta[m] * learning_rate / batch_size) for m in range(l)]
+        w = adam(w,cost_terms_weight[::-1],j+1)
+    validation_activations,_,_ = forward_pass(X_test,'test')
+    train_activations,_,_ = forward_pass(X_train,'test')
+    ypred_validate = np.argmax(validation_activations[l+1],axis=1)
+    ypred_train = np.argmax(train_activations[l+1],axis=1)
+    print "CV accuracy: "+str(accuracy_score(y_test,ypred_validate))+\
+          " , Training accuracy: "+str(accuracy_score(y_train,ypred_train))+ \
+          " , Log loss: " + str(log_loss(y_test,y_pred=validation_activations[l+1],labels=y_test))
+
+"""""
+#Get predictions from test data
+test_activations,_,_ = forward_pass(test,'test')
+ypred = np.argmax(test_activations[l+1],axis=1)
+
+"""
